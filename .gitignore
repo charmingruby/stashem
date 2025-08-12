@@ -1,5 +1,2 @@
-# environment variables
-.env
-
-# temporary files
-tmp
+# TODO
+todo.md
