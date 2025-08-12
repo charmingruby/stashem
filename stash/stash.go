@@ -1,4 +1,4 @@
-package cache
+package stash
 
 import (
 	"errors"
@@ -18,16 +18,16 @@ type entry struct {
 	data      []byte
 }
 
-type Cache struct {
+type Stash struct {
 	store map[string]entry
 	mu    *sync.RWMutex
 	ttl   time.Duration
 }
 
-type Option func(*Cache)
+type Option func(*Stash)
 
-func New(opts ...Option) *Cache {
-	c := &Cache{
+func New(opts ...Option) *Stash {
+	c := &Stash{
 		mu:    &sync.RWMutex{},
 		store: make(map[string]entry),
 		ttl:   defaultTTL,
@@ -41,12 +41,12 @@ func New(opts ...Option) *Cache {
 }
 
 func WithTTL(ttl time.Duration) Option {
-	return func(c *Cache) {
+	return func(c *Stash) {
 		c.ttl = ttl
 	}
 }
 
-func (c *Cache) Get(key string) ([]byte, error) {
+func (c *Stash) Get(key string) ([]byte, error) {
 	c.mu.RLock()
 	entry, ok := c.store[key]
 	c.mu.RUnlock()
@@ -70,7 +70,7 @@ func (c *Cache) Get(key string) ([]byte, error) {
 	return entry.data, nil
 }
 
-func (c *Cache) Set(key string, value []byte) error {
+func (c *Stash) Set(key string, value []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

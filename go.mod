@@ -1,4 +1,4 @@
-module github.com/charmingruby/cachi
+module github.com/charmingruby/stashem
 
 go 1.24.3
 

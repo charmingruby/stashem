@@ -1,4 +1,4 @@
-package cache
+package stash
 
 import (
 	"encoding/json"
@@ -13,29 +13,29 @@ type dummy struct {
 	ID string `json:"id"`
 }
 
-func Test_Cache_New(t *testing.T) {
-	t.Run("returns Cache with default values", func(t *testing.T) {
-		c := New()
+func Test_Stash_New(t *testing.T) {
+	t.Run("returns Stash with default values", func(t *testing.T) {
+		s := New()
 
-		assert.Equal(t, defaultTTL, c.ttl)
-		assert.Empty(t, c.store)
-		assert.NotNil(t, c.mu)
+		assert.Equal(t, defaultTTL, s.ttl)
+		assert.Empty(t, s.store)
+		assert.NotNil(t, s.mu)
 	})
 
-	t.Run("returns Cache with a custom ttl duration", func(t *testing.T) {
+	t.Run("returns Stash with a custom ttl duration", func(t *testing.T) {
 		ttl := 10 * time.Minute
 
-		c := New(WithTTL(
+		s := New(WithTTL(
 			ttl,
 		))
 
-		assert.Equal(t, ttl, c.ttl)
-		assert.Empty(t, c.store)
-		assert.NotNil(t, c.mu)
+		assert.Equal(t, ttl, s.ttl)
+		assert.Empty(t, s.store)
+		assert.NotNil(t, s.mu)
 	})
 }
 
-func Test_Cache_Get(t *testing.T) {
+func Test_Stash_Get(t *testing.T) {
 	key := "dummy-key"
 
 	value := dummy{
@@ -46,7 +46,7 @@ func Test_Cache_Get(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("returns data from a valid key", func(t *testing.T) {
-		cache := New()
+		stash := New()
 
 		key := "dummy-key"
 
@@ -55,9 +55,9 @@ func Test_Cache_Get(t *testing.T) {
 			expiresAt: time.Now().Add(defaultTTL),
 		}
 
-		cache.store[key] = entry
+		stash.store[key] = entry
 
-		retrievedValue, err := cache.Get(key)
+		retrievedValue, err := stash.Get(key)
 		require.NoError(t, err)
 
 		var parsedValue dummy
@@ -67,32 +67,32 @@ func Test_Cache_Get(t *testing.T) {
 	})
 
 	t.Run("returns an ErrExpired error if key is expired", func(t *testing.T) {
-		cache := New()
+		stash := New()
 
 		entry := entry{
 			data:      valueInBytes,
 			expiresAt: time.Now().Add(-defaultTTL),
 		}
 
-		cache.store[key] = entry
+		stash.store[key] = entry
 
-		retrievedValue, err := cache.Get(key)
+		retrievedValue, err := stash.Get(key)
 		require.Nil(t, retrievedValue)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrExpired)
 	})
 
 	t.Run("returns an ErrNotFound error if key does not exists", func(t *testing.T) {
-		cache := New()
+		stash := New()
 
-		retrievedValue, err := cache.Get(key)
+		retrievedValue, err := stash.Get(key)
 		require.Nil(t, retrievedValue)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
-// func Test_Cache_Set(t *testing.T) {
+// func Test_Stash_Set(t *testing.T) {
 // 	key := "dummy-key"
 
 // 	value := dummy{
