@@ -92,17 +92,48 @@ func Test_Stash_Get(t *testing.T) {
 	})
 }
 
-// func Test_Stash_Set(t *testing.T) {
-// 	key := "dummy-key"
+func Test_Stash_Set(t *testing.T) {
+	key := "dummy-key"
 
-// 	value := dummy{
-// 		ID: "id",
-// 	}
+	value := dummy{
+		ID: "id",
+	}
 
-// 	valueInBytes, err := json.Marshal(value)
-// 	require.NoError(t, err)
+	valueInBytes, err := json.Marshal(value)
+	require.NoError(t, err)
 
-// 	t.Run("", func(t *testing.T) {})
+	t.Run("updates already existent entry", func(t *testing.T) {
+		s := New()
 
-// 	t.Run("", func(t *testing.T) {})
-// }
+		oldValue := dummy{ID: "old-id"}
+		oldValueInBytes, err := json.Marshal(oldValue)
+		require.NoError(t, err)
+
+		entry := entry{
+			data:      oldValueInBytes,
+			expiresAt: time.Now().Add(defaultTTL),
+		}
+
+		s.store[key] = entry
+
+		err = s.Set(key, valueInBytes)
+		require.NoError(t, err)
+
+		updated, ok := s.store[key]
+		require.True(t, ok)
+		assert.True(t, updated.expiresAt.After(time.Now()))
+		assert.Equal(t, oldValueInBytes, updated.data)
+	})
+
+	t.Run("stores a new entry", func(t *testing.T) {
+		s := New()
+
+		err := s.Set(key, valueInBytes)
+		require.NoError(t, err)
+
+		stored, ok := s.store[key]
+		require.True(t, ok)
+		assert.Equal(t, valueInBytes, stored.data)
+		assert.True(t, stored.expiresAt.After(time.Now()))
+	})
+}
