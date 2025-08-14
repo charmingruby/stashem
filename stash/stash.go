@@ -7,7 +7,12 @@ import (
 	"time"
 )
 
-var defaultTTL = 5 * time.Minute
+const defaultEntriesLimit = 1000
+
+var (
+	defaultTTL         = 5 * time.Minute
+	defaultMemoryLimit = 5 * 1024 * 1024 // 5mb
+)
 
 var (
 	ErrExpired                 = errors.New("key expired")
@@ -26,24 +31,25 @@ type storageLimit struct {
 }
 
 type Stash struct {
-	stopCh chan struct{}
-	store  map[string]entry
-	limit  storageLimit
-	mu     sync.RWMutex
-	ttl    time.Duration
+	store      map[string]entry
+	limit      storageLimit
+	mu         sync.RWMutex
+	ttl        time.Duration
+	stopCh     chan struct{}
+	usedMemory int
 }
 
 type Option func(*Stash)
 
-func New(opts ...Option) *Stash {
+func Default(opts ...Option) *Stash {
 	s := &Stash{
-		store:  make(map[string]entry),
-		ttl:    defaultTTL,
-		stopCh: make(chan struct{}),
+		ttl: defaultTTL,
 		limit: storageLimit{
-			memory:  1000,
-			entries: 1000,
+			memory:  defaultMemoryLimit,
+			entries: defaultEntriesLimit,
 		},
+		store:  make(map[string]entry),
+		stopCh: make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -51,7 +57,6 @@ func New(opts ...Option) *Stash {
 	}
 
 	go s.cleanupRoutine()
-
 	return s
 }
 
@@ -61,50 +66,65 @@ func WithTTL(ttl time.Duration) Option {
 	}
 }
 
-func WithLimit(memory, entries int) Option {
+func WithMemoryLimit(memory int) Option {
 	return func(s *Stash) {
-		s.limit = storageLimit{
-			memory:  memory,
-			entries: entries,
+		if memory != 0 {
+			s.limit.memory = memory
+		}
+	}
+}
+
+func WithEntriesLimit(entries int) Option {
+	return func(s *Stash) {
+		if entries != 0 {
+			s.limit.entries = entries
 		}
 	}
 }
 
 func (s *Stash) Get(key string) ([]byte, error) {
 	s.mu.RLock()
-	entry, ok := s.store[key]
+	e, ok := s.store[key]
 	s.mu.RUnlock()
 
 	if !ok {
 		return nil, ErrNotFound
 	}
 
-	if s.isEntryExpired(entry) {
+	if e.expiresAt.Before(time.Now()) {
 		s.mu.Lock()
 		delete(s.store, key)
+		s.usedMemory -= len(e.data)
 		s.mu.Unlock()
+
 		return nil, ErrExpired
 	}
 
-	return entry.data, nil
+	return e.data, nil
 }
 
 func (s *Stash) Set(key string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if entry, ok := s.store[key]; ok {
-		if bytes.Equal(entry.data, data) {
-			entry.expiresAt = time.Now().Add(s.ttl)
-			s.store[key] = entry
-
+	existing, exists := s.store[key]
+	dataToBeOverwrittenSize := 0
+	if exists {
+		if bytes.Equal(existing.data, data) {
+			existing.expiresAt = time.Now().Add(s.ttl)
+			s.store[key] = existing
 			return nil
 		}
 
-		if !s.hasStorageAvailabilityForUpdate(entry.data, data) {
-			return ErrInsufficientStorageSize
-		}
-	} else if !s.hasStorageAvailabilityForUpdate(nil, data) {
+		dataToBeOverwrittenSize = len(existing.data)
+	}
+
+	newMemoryUsage := s.usedMemory - dataToBeOverwrittenSize + len(data)
+	if newMemoryUsage > s.limit.memory {
+		return ErrInsufficientStorageSize
+	}
+
+	if !exists && len(s.store) >= s.limit.entries {
 		return ErrInsufficientStorageSize
 	}
 
@@ -112,6 +132,9 @@ func (s *Stash) Set(key string, data []byte) error {
 		data:      data,
 		expiresAt: time.Now().Add(s.ttl),
 	}
+
+	s.usedMemory = newMemoryUsage
+
 	return nil
 }
 
@@ -134,48 +157,14 @@ func (s *Stash) cleanupRoutine() {
 }
 
 func (s *Stash) cleanup() {
-	expiredKeys := make([]string, 0)
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	s.mu.RLock()
 	for k, e := range s.store {
-		if time.Now().After(e.expiresAt) {
-			expiredKeys = append(expiredKeys, k)
-		}
-	}
-	s.mu.RUnlock()
-
-	if len(expiredKeys) > 0 {
-		s.mu.Lock()
-		for _, k := range expiredKeys {
+		if e.expiresAt.Before(now) {
+			s.usedMemory -= len(e.data)
 			delete(s.store, k)
 		}
-		s.mu.Unlock()
 	}
-}
-
-func (s *Stash) hasStorageAvailabilityForUpdate(oldData, newData []byte) bool {
-	totalMemory := 0
-	for _, v := range s.store {
-		totalMemory += len(v.data)
-	}
-
-	if oldData != nil {
-		totalMemory -= len(oldData)
-	}
-
-	totalMemory += len(newData)
-
-	if totalMemory > s.limit.memory {
-		return false
-	}
-
-	if oldData == nil && len(s.store) >= s.limit.entries {
-		return false
-	}
-
-	return true
-}
-
-func (s *Stash) isEntryExpired(e entry) bool {
-	return e.expiresAt.Before(time.Now())
 }
