@@ -20,11 +20,21 @@ func Test_Stash_New(t *testing.T) {
 		assert.Empty(t, s.store)
 	})
 
-	t.Run("returns Stash with a custom ttl duration", func(t *testing.T) {
+	t.Run("applies custom ttl duration", func(t *testing.T) {
 		ttl := 10 * time.Minute
 		s := New(WithTTL(ttl))
 		assert.Equal(t, ttl, s.ttl)
 		assert.Empty(t, s.store)
+	})
+
+	t.Run("applies custom limits", func(t *testing.T) {
+		entries := 5
+		memory := 500
+
+		s := New(WithLimit(memory, entries))
+
+		assert.Equal(t, entries, s.limit.entries)
+		assert.Equal(t, memory, s.limit.memory)
 	})
 }
 
@@ -127,12 +137,34 @@ func Test_Stash_Set(t *testing.T) {
 	})
 
 	t.Run("returns error if entry to updates exceeds memory", func(t *testing.T) {
-		s := New(WithLimit(StorageLimit{entries: 10, memory: 5}))
+		data := []byte("123")
+		maxMemory := len(data)
 
-		err := s.Set("k1", []byte("123"))
+		s := New(WithLimit(maxMemory, 5))
+
+		err := s.Set("k1", data)
 		require.NoError(t, err)
 
 		err = s.Set("k1", []byte("123456"))
+		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
+	})
+
+	t.Run("returns error if entry limit exceeded for new key", func(t *testing.T) {
+		s := New(WithLimit(100, 1))
+
+		err := s.Set("k1", []byte("data"))
+		require.NoError(t, err)
+
+		err = s.Set("k2", []byte("data2"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
+	})
+
+	t.Run("returns error if memory limit exceeded", func(t *testing.T) {
+		s := New(WithLimit(1, 5))
+
+		err := s.Set("k1", []byte("123456"))
+		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
 	})
 }
@@ -156,7 +188,7 @@ func Test_Stash_Cleanup(t *testing.T) {
 
 func Test_Stash_HasStorageAvailabilityForUpdate(t *testing.T) {
 	t.Run("blocks adding new entry when entry limit reached", func(t *testing.T) {
-		s := New(WithLimit(StorageLimit{entries: 2, memory: 1000}))
+		s := New(WithLimit(2, 1000))
 
 		s.store["k1"] = entry{data: []byte("1")}
 		s.store["k2"] = entry{data: []byte("2")}
@@ -166,40 +198,12 @@ func Test_Stash_HasStorageAvailabilityForUpdate(t *testing.T) {
 	})
 
 	t.Run("allows updating existing entry even if limit reached", func(t *testing.T) {
-		s := New(WithLimit(StorageLimit{entries: 2, memory: 1000}))
+		s := New(WithLimit(100, 4))
 
 		s.store["k1"] = entry{data: []byte("old")}
 		s.store["k2"] = entry{data: []byte("2")}
 
 		canUpdate := s.hasStorageAvailabilityForUpdate([]byte("old"), []byte("new"))
 		assert.True(t, canUpdate)
-	})
-}
-
-func Test_Stash_Set_ErrInsufficientStorageSize(t *testing.T) {
-	t.Run("returns error if entry limit exceeded for new key", func(t *testing.T) {
-		s := New(WithLimit(StorageLimit{entries: 1, memory: 1000}))
-
-		err := s.Set("k1", []byte("data"))
-		require.NoError(t, err)
-
-		err = s.Set("k2", []byte("data2"))
-		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
-	})
-
-	t.Run("returns error if memory limit exceeded", func(t *testing.T) {
-		s := New(WithLimit(StorageLimit{entries: 10, memory: 5}))
-
-		err := s.Set("k1", []byte("123456"))
-		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
-	})
-}
-
-func Test_Stash_WithLimit(t *testing.T) {
-	t.Run("applies custom limits", func(t *testing.T) {
-		limit := StorageLimit{entries: 5, memory: 500}
-		s := New(WithLimit(limit))
-
-		assert.Equal(t, limit, s.limit)
 	})
 }

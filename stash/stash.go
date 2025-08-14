@@ -20,7 +20,7 @@ type entry struct {
 	data      []byte
 }
 
-type StorageLimit struct {
+type storageLimit struct {
 	memory  int
 	entries int
 }
@@ -28,7 +28,7 @@ type StorageLimit struct {
 type Stash struct {
 	stopCh chan struct{}
 	store  map[string]entry
-	limit  StorageLimit
+	limit  storageLimit
 	mu     sync.RWMutex
 	ttl    time.Duration
 }
@@ -40,7 +40,7 @@ func New(opts ...Option) *Stash {
 		store:  make(map[string]entry),
 		ttl:    defaultTTL,
 		stopCh: make(chan struct{}),
-		limit: StorageLimit{
+		limit: storageLimit{
 			memory:  1000,
 			entries: 1000,
 		},
@@ -61,9 +61,12 @@ func WithTTL(ttl time.Duration) Option {
 	}
 }
 
-func WithLimit(sl StorageLimit) Option {
+func WithLimit(memory, entries int) Option {
 	return func(s *Stash) {
-		s.limit = sl
+		s.limit = storageLimit{
+			memory:  memory,
+			entries: entries,
+		}
 	}
 }
 
@@ -151,10 +154,6 @@ func (s *Stash) cleanup() {
 }
 
 func (s *Stash) hasStorageAvailabilityForUpdate(oldData, newData []byte) bool {
-	if len(s.store) >= s.limit.entries && oldData == nil {
-		return false
-	}
-
 	totalMemory := 0
 	for _, v := range s.store {
 		totalMemory += len(v.data)
@@ -163,9 +162,18 @@ func (s *Stash) hasStorageAvailabilityForUpdate(oldData, newData []byte) bool {
 	if oldData != nil {
 		totalMemory -= len(oldData)
 	}
+
 	totalMemory += len(newData)
 
-	return totalMemory <= s.limit.memory
+	if totalMemory > s.limit.memory {
+		return false
+	}
+
+	if oldData == nil && len(s.store) >= s.limit.entries {
+		return false
+	}
+
+	return true
 }
 
 func (s *Stash) isEntryExpired(e entry) bool {
