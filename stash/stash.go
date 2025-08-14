@@ -19,37 +19,41 @@ type entry struct {
 }
 
 type Stash struct {
-	store map[string]entry
-	mu    *sync.RWMutex
-	ttl   time.Duration
+	store  map[string]entry
+	mu     *sync.RWMutex
+	ttl    time.Duration
+	stopCh chan struct{}
 }
 
 type Option func(*Stash)
 
 func New(opts ...Option) *Stash {
-	c := &Stash{
-		mu:    &sync.RWMutex{},
-		store: make(map[string]entry),
-		ttl:   defaultTTL,
+	s := &Stash{
+		mu:     &sync.RWMutex{},
+		store:  make(map[string]entry),
+		ttl:    defaultTTL,
+		stopCh: make(chan struct{}),
 	}
 
 	for _, opt := range opts {
-		opt(c)
+		opt(s)
 	}
 
-	return c
+	go s.cleanupRoutine()
+
+	return s
 }
 
 func WithTTL(ttl time.Duration) Option {
-	return func(c *Stash) {
-		c.ttl = ttl
+	return func(s *Stash) {
+		s.ttl = ttl
 	}
 }
 
-func (c *Stash) Get(key string) ([]byte, error) {
-	c.mu.RLock()
-	entry, ok := c.store[key]
-	c.mu.RUnlock()
+func (s *Stash) Get(key string) ([]byte, error) {
+	s.mu.RLock()
+	entry, ok := s.store[key]
+	s.mu.RUnlock()
 
 	if !ok {
 		return nil, ErrNotFound
@@ -60,9 +64,9 @@ func (c *Stash) Get(key string) ([]byte, error) {
 	isExpired := entry.expiresAt.Before(now)
 
 	if isExpired {
-		c.mu.Lock()
-		delete(c.store, key)
-		c.mu.Unlock()
+		s.mu.Lock()
+		delete(s.store, key)
+		s.mu.Unlock()
 
 		return nil, ErrExpired
 	}
@@ -70,25 +74,42 @@ func (c *Stash) Get(key string) ([]byte, error) {
 	return entry.data, nil
 }
 
-func (c *Stash) Set(key string, value []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *Stash) Set(key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	now := time.Now()
 
-	if entry, ok := c.store[key]; ok {
-		entry.expiresAt = now.Add(c.ttl)
-		c.store[key] = entry
+	if entry, ok := s.store[key]; ok {
+		entry.expiresAt = now.Add(s.ttl)
+		s.store[key] = entry
 
 		return nil
 	}
 
 	entry := entry{
 		data:      value,
-		expiresAt: now.Add(c.ttl),
+		expiresAt: now.Add(s.ttl),
 	}
 
-	c.store[key] = entry
+	s.store[key] = entry
 
 	return nil
+}
+
+func (s *Stash) Stop() {
+	close(s.stopCh)
+}
+
+func (s *Stash) cleanupRoutine() {
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k, e := range s.store {
+		if now.After(e.expiresAt) {
+			delete(s.store, k)
+		}
+	}
 }
