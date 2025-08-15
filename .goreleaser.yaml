@@ -1,6 +1,7 @@
 project_name: stashem
 
-builds: []
+builds:
+  - skip: true
 
 release:
   github:
