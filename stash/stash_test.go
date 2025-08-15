@@ -83,7 +83,7 @@ func Test_Stash_Get(t *testing.T) {
 		stash.usedMemory += len(valueInBytes)
 
 		data, err := stash.Get(key)
-		assert.ErrorIs(t, err, ErrExpired)
+		require.ErrorIs(t, err, ErrExpired)
 		assert.Nil(t, data)
 	})
 
@@ -91,7 +91,8 @@ func Test_Stash_Get(t *testing.T) {
 		stash := Default()
 
 		data, err := stash.Get(key)
-		assert.ErrorIs(t, err, ErrNotFound)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNotFound)
 		assert.Nil(t, data)
 	})
 }
@@ -110,7 +111,8 @@ func Test_Stash_Set(t *testing.T) {
 
 		element, exists := s.store[key]
 		require.True(t, exists)
-		stored := element.Value.(*entry)
+		stored, ok := element.Value.(*entry)
+		assert.True(t, ok)
 		assert.Equal(t, valueInBytes, stored.data)
 		assert.True(t, stored.expiresAt.After(time.Now()))
 	})
@@ -135,7 +137,8 @@ func Test_Stash_Set(t *testing.T) {
 
 		updatedElement, exists := s.store[key]
 		require.True(t, exists)
-		updated := updatedElement.Value.(*entry)
+		updated, ok := updatedElement.Value.(*entry)
+		assert.True(t, ok)
 		assert.Equal(t, valueInBytes, updated.data)
 		assert.True(t, updated.expiresAt.After(time.Now()))
 	})
@@ -157,7 +160,8 @@ func Test_Stash_Set(t *testing.T) {
 		require.NoError(t, err)
 
 		updatedElement := s.store[key]
-		updated := updatedElement.Value.(*entry)
+		updated, ok := updatedElement.Value.(*entry)
+		assert.True(t, ok)
 		assert.Equal(t, valueInBytes, updated.data)
 		assert.True(t, updated.expiresAt.After(oldExpiration))
 	})
@@ -171,7 +175,7 @@ func Test_Stash_Set(t *testing.T) {
 		require.NoError(t, err)
 
 		err = s.Set("k1", []byte("123456"))
-		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
+		require.ErrorIs(t, err, ErrInsufficientStorageSize)
 	})
 
 	t.Run("returns error if entry limit exceeded", func(t *testing.T) {
@@ -181,7 +185,7 @@ func Test_Stash_Set(t *testing.T) {
 
 		err = s.Set("k2", []byte("data2"))
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
+		require.ErrorIs(t, err, ErrInsufficientStorageSize)
 	})
 }
 
@@ -205,6 +209,7 @@ func Test_Stash_Cleanup(t *testing.T) {
 	s.cleanup()
 
 	data, err := s.Get(key)
-	assert.ErrorIs(t, err, ErrNotFound)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNotFound)
 	assert.Nil(t, data)
 }

@@ -28,8 +28,9 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:    ":3000",
-		Handler: r,
+		Addr:              ":3000",
+		Handler:           r,
+		ReadHeaderTimeout: time.Second * 10,
 	}
 
 	go func() {

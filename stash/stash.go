@@ -17,6 +17,7 @@ var (
 
 var (
 	ErrExpired                 = errors.New("key expired")
+	ErrInvalidEntryType        = errors.New("invalid entry type")
 	ErrInsufficientStorageSize = errors.New("insufficient storage size")
 	ErrNotFound                = errors.New("key not found")
 )
@@ -33,12 +34,12 @@ type storageLimit struct {
 }
 
 type Stash struct {
-	order      *list.List
 	store      map[string]*list.Element
+	stopCh     chan struct{}
+	order      *list.List
 	limit      storageLimit
 	mu         sync.RWMutex
 	ttl        time.Duration
-	stopCh     chan struct{}
 	usedMemory int
 }
 
@@ -98,7 +99,11 @@ func (s *Stash) Get(key string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
-	entry := element.Value.(*entry)
+	entry, ok := element.Value.(*entry)
+	if !ok {
+		return nil, ErrInvalidEntryType
+	}
+
 	if entry.expiresAt.Before(time.Now()) {
 		s.mu.Lock()
 		s.order.Remove(element)
@@ -120,7 +125,11 @@ func (s *Stash) Set(key string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if element, exists := s.store[key]; exists {
-		existing := element.Value.(*entry)
+		existing, ok := element.Value.(*entry)
+		if !ok {
+			return ErrInvalidEntryType
+		}
+
 		if bytes.Equal(existing.data, data) {
 			existing.expiresAt = time.Now().Add(s.ttl)
 			s.order.MoveToFront(element)
@@ -143,6 +152,7 @@ func (s *Stash) Set(key string, data []byte) error {
 	if len(data) > s.limit.memory {
 		return ErrInsufficientStorageSize
 	}
+
 	if s.usedMemory+len(data) > s.limit.memory {
 		return ErrInsufficientStorageSize
 	}
@@ -188,7 +198,12 @@ func (s *Stash) cleanup() {
 	defer s.mu.Unlock()
 
 	for element := s.order.Back(); element != nil; {
-		entry := element.Value.(*entry)
+		entry, ok := element.Value.(*entry)
+
+		if !ok {
+			continue
+		}
+
 		next := element.Prev()
 
 		if entry.expiresAt.Before(now) {
