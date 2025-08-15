@@ -214,7 +214,7 @@ func Test_Stash_Set(t *testing.T) {
 
 		newKey := "k2"
 		err = s.Set(newKey, data)
-		assert.Nil(t, err)
+		require.NoError(t, err)
 
 		e := s.getElementEntry(s.accessList.Front())
 		assert.Equal(t, e.key, newKey)

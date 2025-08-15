@@ -33,13 +33,13 @@ type config struct {
 }
 
 type Stash struct {
-	mu            sync.RWMutex
 	entries       map[string]*list.Element
-	accessList    *list.List
-	config        config
-	ttl           time.Duration
-	currentMemory int
 	shutdownChan  chan struct{}
+	accessList    *list.List
+	ttl           time.Duration
+	config        config
+	currentMemory int
+	mu            sync.RWMutex
 }
 
 type Option func(*Stash)
@@ -128,7 +128,10 @@ func (c *Stash) Set(key string, data []byte) error {
 			return ErrInsufficientStorageSize
 		}
 	}
-	return c.addNewEntry(key, data)
+
+	c.addNewEntry(key, data)
+
+	return nil
 }
 
 func (c *Stash) Shutdown() {
@@ -136,7 +139,8 @@ func (c *Stash) Shutdown() {
 }
 
 func (c *Stash) getElementEntry(element *list.Element) *entry {
-	return element.Value.(*entry)
+	entry, _ := element.Value.(*entry)
+	return entry
 }
 
 func (c *Stash) updateAccess(el *list.Element, en *entry) {
@@ -196,7 +200,7 @@ func (c *Stash) updateExistingEntry(element *list.Element, newData []byte) error
 	return nil
 }
 
-func (c *Stash) addNewEntry(key string, data []byte) error {
+func (c *Stash) addNewEntry(key string, data []byte) {
 	entry := &entry{
 		key:       key,
 		data:      data,
@@ -206,8 +210,6 @@ func (c *Stash) addNewEntry(key string, data []byte) error {
 	element := c.accessList.PushFront(entry)
 	c.entries[key] = element
 	c.currentMemory += len(data)
-
-	return nil
 }
 
 func (c *Stash) cleanupRoutine() {
