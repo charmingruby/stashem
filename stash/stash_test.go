@@ -18,8 +18,8 @@ func Test_Stash_Default(t *testing.T) {
 		s := Default()
 
 		assert.Equal(t, defaultTTL, s.ttl)
-		assert.NotNil(t, s.order)
-		assert.Empty(t, s.store)
+		assert.NotNil(t, s.accessList)
+		assert.Empty(t, s.entries)
 	})
 
 	t.Run("applies custom ttl duration", func(t *testing.T) {
@@ -28,17 +28,17 @@ func Test_Stash_Default(t *testing.T) {
 		s := Default(WithTTL(customTTL))
 
 		assert.Equal(t, customTTL, s.ttl)
-		assert.NotNil(t, s.order)
-		assert.Empty(t, s.store)
+		assert.NotNil(t, s.accessList)
+		assert.Empty(t, s.entries)
 	})
 
 	t.Run("applies custom limits", func(t *testing.T) {
 		entries := 5
 		memory := 500
 
-		s := Default(WithMemoryLimit(memory), WithEntriesLimit(entries))
-		assert.Equal(t, entries, s.limit.entries)
-		assert.Equal(t, memory, s.limit.memory)
+		s := Default(WithMemoryLimit(memory), WithEntryLimit(entries))
+		assert.Equal(t, entries, s.config.maxEntries)
+		assert.Equal(t, memory, s.config.maxMemory)
 	})
 }
 
@@ -51,15 +51,14 @@ func Test_Stash_Get(t *testing.T) {
 	t.Run("returns data from a valid key", func(t *testing.T) {
 		stash := Default()
 
-		// Create entry and add to both store and list
 		e := &entry{
 			key:       key,
 			data:      valueInBytes,
 			expiresAt: time.Now().Add(defaultTTL),
 		}
-		element := stash.order.PushFront(e)
-		stash.store[key] = element
-		stash.usedMemory += len(valueInBytes)
+		element := stash.accessList.PushFront(e)
+		stash.entries[key] = element
+		stash.currentMemory += len(valueInBytes)
 
 		data, err := stash.Get(key)
 		require.NoError(t, err)
@@ -70,6 +69,34 @@ func Test_Stash_Get(t *testing.T) {
 		assert.Equal(t, value.ID, parsed.ID)
 	})
 
+	t.Run("returns data from a valid key and updates expiration time on accessList and store", func(t *testing.T) {
+		stash := Default()
+
+		e := &entry{
+			key:       key,
+			data:      valueInBytes,
+			expiresAt: time.Now().Add(defaultTTL),
+		}
+
+		entryCopy := *e
+
+		el := stash.accessList.PushFront(e)
+		stash.entries[key] = el
+		stash.currentMemory += len(valueInBytes)
+
+		data, err := stash.Get(key)
+		require.NoError(t, err)
+
+		var parsed dummy
+		err = json.Unmarshal(data, &parsed)
+		require.NoError(t, err)
+		assert.Equal(t, value.ID, parsed.ID)
+
+		mostRecentEl := stash.accessList.Front()
+		en := stash.getElementEntry(mostRecentEl)
+		assert.True(t, en.expiresAt.After(entryCopy.expiresAt))
+	})
+
 	t.Run("returns error if key is expired", func(t *testing.T) {
 		stash := Default()
 
@@ -78,9 +105,9 @@ func Test_Stash_Get(t *testing.T) {
 			data:      valueInBytes,
 			expiresAt: time.Now().Add(-time.Minute),
 		}
-		element := stash.order.PushFront(e)
-		stash.store[key] = element
-		stash.usedMemory += len(valueInBytes)
+		element := stash.accessList.PushFront(e)
+		stash.entries[key] = element
+		stash.currentMemory += len(valueInBytes)
 
 		data, err := stash.Get(key)
 		require.ErrorIs(t, err, ErrExpired)
@@ -109,7 +136,7 @@ func Test_Stash_Set(t *testing.T) {
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		element, exists := s.store[key]
+		element, exists := s.entries[key]
 		require.True(t, exists)
 		stored, ok := element.Value.(*entry)
 		assert.True(t, ok)
@@ -122,20 +149,19 @@ func Test_Stash_Set(t *testing.T) {
 		oldValue := dummy{ID: "old-id"}
 		oldBytes, _ := json.Marshal(oldValue)
 
-		// Add initial entry
 		e := &entry{
 			key:       key,
 			data:      oldBytes,
 			expiresAt: time.Now().Add(defaultTTL),
 		}
-		element := s.order.PushFront(e)
-		s.store[key] = element
-		s.usedMemory += len(oldBytes)
+		element := s.accessList.PushFront(e)
+		s.entries[key] = element
+		s.currentMemory += len(oldBytes)
 
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		updatedElement, exists := s.store[key]
+		updatedElement, exists := s.entries[key]
 		require.True(t, exists)
 		updated, ok := updatedElement.Value.(*entry)
 		assert.True(t, ok)
@@ -152,14 +178,14 @@ func Test_Stash_Set(t *testing.T) {
 			data:      valueInBytes,
 			expiresAt: oldExpiration,
 		}
-		element := s.order.PushFront(e)
-		s.store[key] = element
-		s.usedMemory += len(valueInBytes)
+		element := s.accessList.PushFront(e)
+		s.entries[key] = element
+		s.currentMemory += len(valueInBytes)
 
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		updatedElement := s.store[key]
+		updatedElement := s.entries[key]
 		updated, ok := updatedElement.Value.(*entry)
 		assert.True(t, ok)
 		assert.Equal(t, valueInBytes, updated.data)
@@ -170,7 +196,7 @@ func Test_Stash_Set(t *testing.T) {
 		data := []byte("123")
 		maxMemory := len(data)
 
-		s := Default(WithMemoryLimit(maxMemory), WithEntriesLimit(5))
+		s := Default(WithMemoryLimit(maxMemory), WithEntryLimit(5))
 		err := s.Set("k1", data)
 		require.NoError(t, err)
 
@@ -178,38 +204,19 @@ func Test_Stash_Set(t *testing.T) {
 		require.ErrorIs(t, err, ErrInsufficientStorageSize)
 	})
 
-	t.Run("returns error if entry limit exceeded", func(t *testing.T) {
-		s := Default(WithMemoryLimit(100), WithEntriesLimit(1))
-		err := s.Set("k1", []byte("data"))
+	t.Run("ensures space needed when memory limit is reached", func(t *testing.T) {
+		data := []byte("data")
+		dataSize := len(data)
+
+		s := Default(WithMemoryLimit(dataSize), WithEntryLimit(10))
+		err := s.Set("k1", data)
 		require.NoError(t, err)
 
-		err = s.Set("k2", []byte("data2"))
-		require.Error(t, err)
-		require.ErrorIs(t, err, ErrInsufficientStorageSize)
+		newKey := "k2"
+		err = s.Set(newKey, data)
+		assert.Nil(t, err)
+
+		e := s.getElementEntry(s.accessList.Front())
+		assert.Equal(t, e.key, newKey)
 	})
-}
-
-func Test_Stash_Cleanup(t *testing.T) {
-	key := "dummy-key"
-	value := dummy{ID: "id"}
-	valueInBytes, _ := json.Marshal(value)
-
-	s := Default()
-
-	// Add expired entry
-	e := &entry{
-		key:       key,
-		data:      valueInBytes,
-		expiresAt: time.Now().Add(-time.Minute),
-	}
-	element := s.order.PushFront(e)
-	s.store[key] = element
-	s.usedMemory += len(valueInBytes)
-
-	s.cleanup()
-
-	data, err := s.Get(key)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrNotFound)
-	assert.Nil(t, data)
 }

@@ -8,11 +8,10 @@ import (
 	"time"
 )
 
-const defaultEntriesLimit = 1000
-
-var (
-	defaultTTL         = 5 * time.Minute
-	defaultMemoryLimit = 5 * 1024 * 1024 // 5mb
+const (
+	defaultEntriesLimit = 1000
+	defaultMemoryLimit  = 5 * 1024 * 1024 // 5MB
+	defaultTTL          = 5 * time.Minute
 )
 
 var (
@@ -28,188 +27,216 @@ type entry struct {
 	data      []byte
 }
 
-type storageLimit struct {
-	memory  int
-	entries int
+type config struct {
+	maxMemory  int
+	maxEntries int
 }
 
 type Stash struct {
-	store      map[string]*list.Element
-	stopCh     chan struct{}
-	order      *list.List
-	limit      storageLimit
-	mu         sync.RWMutex
-	ttl        time.Duration
-	usedMemory int
+	mu            sync.RWMutex
+	entries       map[string]*list.Element
+	accessList    *list.List
+	config        config
+	ttl           time.Duration
+	currentMemory int
+	shutdownChan  chan struct{}
 }
 
 type Option func(*Stash)
 
 func Default(opts ...Option) *Stash {
-	s := &Stash{
-		ttl: defaultTTL,
-		limit: storageLimit{
-			memory:  defaultMemoryLimit,
-			entries: defaultEntriesLimit,
-		},
-		order:  list.New(),
-		store:  make(map[string]*list.Element),
-		stopCh: make(chan struct{}),
+	c := &Stash{
+		ttl:          defaultTTL,
+		config:       config{maxMemory: defaultMemoryLimit, maxEntries: defaultEntriesLimit},
+		accessList:   list.New(),
+		entries:      make(map[string]*list.Element),
+		shutdownChan: make(chan struct{}),
 	}
 
 	for _, opt := range opts {
-		opt(s)
+		opt(c)
 	}
 
-	if s.ttl > 0 {
-		go s.cleanupRoutine()
+	if c.ttl > 0 {
+		go c.cleanupRoutine()
 	}
 
-	return s
+	return c
 }
 
 func WithTTL(ttl time.Duration) Option {
-	return func(s *Stash) {
-		s.ttl = ttl
+	return func(c *Stash) {
+		if ttl > 0 {
+			c.ttl = ttl
+		}
 	}
 }
 
 func WithMemoryLimit(memory int) Option {
-	return func(s *Stash) {
+	return func(c *Stash) {
 		if memory > 0 {
-			s.limit.memory = memory
+			c.config.maxMemory = memory
 		}
 	}
 }
 
-func WithEntriesLimit(entries int) Option {
-	return func(s *Stash) {
+func WithEntryLimit(entries int) Option {
+	return func(c *Stash) {
 		if entries > 0 {
-			s.limit.entries = entries
+			c.config.maxEntries = entries
 		}
 	}
 }
 
-func (s *Stash) Get(key string) ([]byte, error) {
-	s.mu.RLock()
-	element, ok := s.store[key]
-	s.mu.RUnlock()
+func (c *Stash) Get(key string) ([]byte, error) {
+	c.mu.RLock()
+	element, exists := c.entries[key]
+	c.mu.RUnlock()
 
-	if !ok {
+	if !exists {
 		return nil, ErrNotFound
 	}
 
-	entry, ok := element.Value.(*entry)
-	if !ok {
-		return nil, ErrInvalidEntryType
-	}
-
+	entry := c.getElementEntry(element)
 	if entry.expiresAt.Before(time.Now()) {
-		s.mu.Lock()
-		s.order.Remove(element)
-		delete(s.store, key)
-		s.usedMemory -= len(entry.data)
-		s.mu.Unlock()
-
+		c.evictElement(element)
 		return nil, ErrExpired
 	}
 
-	s.mu.Lock()
-	s.order.MoveToFront(element)
-	s.mu.Unlock()
+	c.updateAccess(element, entry)
 
 	return entry.data, nil
 }
 
-func (s *Stash) Set(key string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if element, exists := s.store[key]; exists {
-		existing, ok := element.Value.(*entry)
-		if !ok {
-			return ErrInvalidEntryType
-		}
+func (c *Stash) Set(key string, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-		if bytes.Equal(existing.data, data) {
-			existing.expiresAt = time.Now().Add(s.ttl)
-			s.order.MoveToFront(element)
+	if element, exists := c.entries[key]; exists {
+		return c.updateExistingEntry(element, data)
+	}
 
-			return nil
-		}
+	if len(data) > c.config.maxMemory {
+		return ErrInsufficientStorageSize
+	}
 
-		newMemoryUsage := s.usedMemory - len(existing.data) + len(data)
-		if newMemoryUsage > s.limit.memory {
+	needsSpace := c.currentMemory+len(data) > c.config.maxMemory ||
+		len(c.entries) >= c.config.maxEntries
+
+	if needsSpace {
+		if !c.ensureSpace(len(data)) {
 			return ErrInsufficientStorageSize
 		}
+	}
+	return c.addNewEntry(key, data)
+}
 
-		s.usedMemory = newMemoryUsage
-		existing.data = data
-		existing.expiresAt = time.Now().Add(s.ttl)
-		s.order.MoveToFront(element)
+func (c *Stash) Shutdown() {
+	close(c.shutdownChan)
+}
+
+func (c *Stash) getElementEntry(element *list.Element) *entry {
+	return element.Value.(*entry)
+}
+
+func (c *Stash) updateAccess(el *list.Element, en *entry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	en.expiresAt = time.Now().Add(c.ttl)
+	c.accessList.MoveToFront(el)
+}
+
+func (c *Stash) evictElement(element *list.Element) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry := c.getElementEntry(element)
+	delete(c.entries, entry.key)
+	c.accessList.Remove(element)
+	c.currentMemory -= len(entry.data)
+}
+
+func (c *Stash) ensureSpace(requiredSpace int) bool {
+	if requiredSpace > c.config.maxMemory {
+		return false
+	}
+
+	for c.currentMemory+requiredSpace <= c.config.maxMemory || len(c.entries) >= c.config.maxEntries {
+		if oldest := c.accessList.Back(); oldest != nil {
+			c.evictElement(oldest)
+			continue
+		}
+
+		return false
+	}
+	return true
+}
+
+func (c *Stash) updateExistingEntry(element *list.Element, newData []byte) error {
+	entry := c.getElementEntry(element)
+
+	if bytes.Equal(entry.data, newData) {
+		entry.expiresAt = time.Now().Add(c.ttl)
+		c.accessList.MoveToFront(element)
+
 		return nil
 	}
 
-	if len(data) > s.limit.memory {
+	newSize := c.currentMemory - len(entry.data) + len(newData)
+	if newSize > c.config.maxMemory {
 		return ErrInsufficientStorageSize
 	}
 
-	if s.usedMemory+len(data) > s.limit.memory {
-		return ErrInsufficientStorageSize
-	}
-
-	if len(s.store) >= s.limit.entries {
-		return ErrInsufficientStorageSize
-	}
-
-	newEntry := &entry{
-		key:       key,
-		data:      data,
-		expiresAt: time.Now().Add(s.ttl),
-	}
-
-	element := s.order.PushFront(newEntry)
-	s.store[key] = element
-	s.usedMemory += len(data)
+	entry.data = newData
+	entry.expiresAt = time.Now().Add(c.ttl)
+	c.currentMemory = newSize
+	c.accessList.MoveToFront(element)
 
 	return nil
 }
 
-func (s *Stash) Stop() {
-	close(s.stopCh)
+func (c *Stash) addNewEntry(key string, data []byte) error {
+	entry := &entry{
+		key:       key,
+		data:      data,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+
+	element := c.accessList.PushFront(entry)
+	c.entries[key] = element
+	c.currentMemory += len(data)
+
+	return nil
 }
 
-func (s *Stash) cleanupRoutine() {
+func (c *Stash) cleanupRoutine() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			s.cleanup()
-		case <-s.stopCh:
+			c.removeExpiredEntries()
+		case <-c.shutdownChan:
 			return
 		}
 	}
 }
 
-func (s *Stash) cleanup() {
+func (c *Stash) removeExpiredEntries() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for element := s.order.Back(); element != nil; {
-		entry, ok := element.Value.(*entry)
-
-		if !ok {
-			continue
-		}
-
+	for element := c.accessList.Back(); element != nil; {
+		entry := c.getElementEntry(element)
 		next := element.Prev()
 
 		if entry.expiresAt.Before(now) {
-			s.usedMemory -= len(entry.data)
-			delete(s.store, entry.key)
-			s.order.Remove(element)
+			delete(c.entries, entry.key)
+			c.accessList.Remove(element)
+			c.currentMemory -= len(entry.data)
 		}
 
 		element = next

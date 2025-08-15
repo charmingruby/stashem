@@ -16,7 +16,7 @@ import (
 func main() {
 	stash := stash.Default(
 		stash.WithTTL(5*time.Second),
-		stash.WithEntriesLimit(1000),
+		stash.WithEntryLimit(1000),
 	)
 
 	r := gin.Default()
