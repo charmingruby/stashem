@@ -1,0 +1,18 @@
+project_name: stashem
+
+builds: []
+
+release:
+  github:
+    owner: charmingruby
+    name: stashem
+  draft: false
+  prerelease: false
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
