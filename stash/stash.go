@@ -2,6 +2,7 @@ package stash
 
 import (
 	"bytes"
+	"container/list"
 	"errors"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ var (
 )
 
 type entry struct {
+	key       string
 	expiresAt time.Time
 	data      []byte
 }
@@ -31,7 +33,8 @@ type storageLimit struct {
 }
 
 type Stash struct {
-	store      map[string]entry
+	order      *list.List
+	store      map[string]*list.Element
 	limit      storageLimit
 	mu         sync.RWMutex
 	ttl        time.Duration
@@ -48,7 +51,8 @@ func Default(opts ...Option) *Stash {
 			memory:  defaultMemoryLimit,
 			entries: defaultEntriesLimit,
 		},
-		store:  make(map[string]entry),
+		order:  list.New(),
+		store:  make(map[string]*list.Element),
 		stopCh: make(chan struct{}),
 	}
 
@@ -56,7 +60,10 @@ func Default(opts ...Option) *Stash {
 		opt(s)
 	}
 
-	go s.cleanupRoutine()
+	if s.ttl > 0 {
+		go s.cleanupRoutine()
+	}
+
 	return s
 }
 
@@ -68,7 +75,7 @@ func WithTTL(ttl time.Duration) Option {
 
 func WithMemoryLimit(memory int) Option {
 	return func(s *Stash) {
-		if memory != 0 {
+		if memory > 0 {
 			s.limit.memory = memory
 		}
 	}
@@ -76,7 +83,7 @@ func WithMemoryLimit(memory int) Option {
 
 func WithEntriesLimit(entries int) Option {
 	return func(s *Stash) {
-		if entries != 0 {
+		if entries > 0 {
 			s.limit.entries = entries
 		}
 	}
@@ -84,56 +91,75 @@ func WithEntriesLimit(entries int) Option {
 
 func (s *Stash) Get(key string) ([]byte, error) {
 	s.mu.RLock()
-	e, ok := s.store[key]
+	element, ok := s.store[key]
 	s.mu.RUnlock()
 
 	if !ok {
 		return nil, ErrNotFound
 	}
 
-	if e.expiresAt.Before(time.Now()) {
+	entry := element.Value.(*entry)
+	if entry.expiresAt.Before(time.Now()) {
 		s.mu.Lock()
+		s.order.Remove(element)
 		delete(s.store, key)
-		s.usedMemory -= len(e.data)
+		s.usedMemory -= len(entry.data)
 		s.mu.Unlock()
 
 		return nil, ErrExpired
 	}
 
-	return e.data, nil
+	s.mu.Lock()
+	s.order.MoveToFront(element)
+	s.mu.Unlock()
+
+	return entry.data, nil
 }
 
 func (s *Stash) Set(key string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	existing, exists := s.store[key]
-	dataToBeOverwrittenSize := 0
-	if exists {
+	if element, exists := s.store[key]; exists {
+		existing := element.Value.(*entry)
 		if bytes.Equal(existing.data, data) {
 			existing.expiresAt = time.Now().Add(s.ttl)
-			s.store[key] = existing
+			s.order.MoveToFront(element)
+
 			return nil
 		}
 
-		dataToBeOverwrittenSize = len(existing.data)
+		newMemoryUsage := s.usedMemory - len(existing.data) + len(data)
+		if newMemoryUsage > s.limit.memory {
+			return ErrInsufficientStorageSize
+		}
+
+		s.usedMemory = newMemoryUsage
+		existing.data = data
+		existing.expiresAt = time.Now().Add(s.ttl)
+		s.order.MoveToFront(element)
+		return nil
 	}
 
-	newMemoryUsage := s.usedMemory - dataToBeOverwrittenSize + len(data)
-	if newMemoryUsage > s.limit.memory {
+	if len(data) > s.limit.memory {
+		return ErrInsufficientStorageSize
+	}
+	if s.usedMemory+len(data) > s.limit.memory {
 		return ErrInsufficientStorageSize
 	}
 
-	if !exists && len(s.store) >= s.limit.entries {
+	if len(s.store) >= s.limit.entries {
 		return ErrInsufficientStorageSize
 	}
 
-	s.store[key] = entry{
+	newEntry := &entry{
+		key:       key,
 		data:      data,
 		expiresAt: time.Now().Add(s.ttl),
 	}
 
-	s.usedMemory = newMemoryUsage
+	element := s.order.PushFront(newEntry)
+	s.store[key] = element
+	s.usedMemory += len(data)
 
 	return nil
 }
@@ -161,10 +187,16 @@ func (s *Stash) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for k, e := range s.store {
-		if e.expiresAt.Before(now) {
-			s.usedMemory -= len(e.data)
-			delete(s.store, k)
+	for element := s.order.Back(); element != nil; {
+		entry := element.Value.(*entry)
+		next := element.Prev()
+
+		if entry.expiresAt.Before(now) {
+			s.usedMemory -= len(entry.data)
+			delete(s.store, entry.key)
+			s.order.Remove(element)
 		}
+
+		element = next
 	}
 }

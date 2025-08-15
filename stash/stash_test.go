@@ -18,6 +18,7 @@ func Test_Stash_Default(t *testing.T) {
 		s := Default()
 
 		assert.Equal(t, defaultTTL, s.ttl)
+		assert.NotNil(t, s.order)
 		assert.Empty(t, s.store)
 	})
 
@@ -27,6 +28,7 @@ func Test_Stash_Default(t *testing.T) {
 		s := Default(WithTTL(customTTL))
 
 		assert.Equal(t, customTTL, s.ttl)
+		assert.NotNil(t, s.order)
 		assert.Empty(t, s.store)
 	})
 
@@ -49,7 +51,14 @@ func Test_Stash_Get(t *testing.T) {
 	t.Run("returns data from a valid key", func(t *testing.T) {
 		stash := Default()
 
-		stash.store[key] = entry{data: valueInBytes, expiresAt: time.Now().Add(defaultTTL)}
+		// Create entry and add to both store and list
+		e := &entry{
+			key:       key,
+			data:      valueInBytes,
+			expiresAt: time.Now().Add(defaultTTL),
+		}
+		element := stash.order.PushFront(e)
+		stash.store[key] = element
 		stash.usedMemory += len(valueInBytes)
 
 		data, err := stash.Get(key)
@@ -63,7 +72,14 @@ func Test_Stash_Get(t *testing.T) {
 
 	t.Run("returns error if key is expired", func(t *testing.T) {
 		stash := Default()
-		stash.store[key] = entry{data: valueInBytes, expiresAt: time.Now().Add(-time.Minute)}
+
+		e := &entry{
+			key:       key,
+			data:      valueInBytes,
+			expiresAt: time.Now().Add(-time.Minute),
+		}
+		element := stash.order.PushFront(e)
+		stash.store[key] = element
 		stash.usedMemory += len(valueInBytes)
 
 		data, err := stash.Get(key)
@@ -92,8 +108,9 @@ func Test_Stash_Set(t *testing.T) {
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		stored, exists := s.store[key]
+		element, exists := s.store[key]
 		require.True(t, exists)
+		stored := element.Value.(*entry)
 		assert.Equal(t, valueInBytes, stored.data)
 		assert.True(t, stored.expiresAt.After(time.Now()))
 	})
@@ -102,28 +119,45 @@ func Test_Stash_Set(t *testing.T) {
 		s := Default()
 		oldValue := dummy{ID: "old-id"}
 		oldBytes, _ := json.Marshal(oldValue)
-		s.store[key] = entry{data: oldBytes, expiresAt: time.Now().Add(defaultTTL)}
+
+		// Add initial entry
+		e := &entry{
+			key:       key,
+			data:      oldBytes,
+			expiresAt: time.Now().Add(defaultTTL),
+		}
+		element := s.order.PushFront(e)
+		s.store[key] = element
 		s.usedMemory += len(oldBytes)
 
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		updated, exists := s.store[key]
+		updatedElement, exists := s.store[key]
 		require.True(t, exists)
+		updated := updatedElement.Value.(*entry)
 		assert.Equal(t, valueInBytes, updated.data)
 		assert.True(t, updated.expiresAt.After(time.Now()))
 	})
 
 	t.Run("resets expiration if value is equal", func(t *testing.T) {
 		s := Default()
-		s.store[key] = entry{data: valueInBytes, expiresAt: time.Now().Add(-time.Minute)}
+
+		oldExpiration := time.Now().Add(-time.Minute)
+		e := &entry{
+			key:       key,
+			data:      valueInBytes,
+			expiresAt: oldExpiration,
+		}
+		element := s.order.PushFront(e)
+		s.store[key] = element
 		s.usedMemory += len(valueInBytes)
 
-		oldExpiration := s.store[key].expiresAt
 		err := s.Set(key, valueInBytes)
 		require.NoError(t, err)
 
-		updated := s.store[key]
+		updatedElement := s.store[key]
+		updated := updatedElement.Value.(*entry)
 		assert.Equal(t, valueInBytes, updated.data)
 		assert.True(t, updated.expiresAt.After(oldExpiration))
 	})
@@ -146,6 +180,7 @@ func Test_Stash_Set(t *testing.T) {
 		require.NoError(t, err)
 
 		err = s.Set("k2", []byte("data2"))
+		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrInsufficientStorageSize)
 	})
 }
@@ -156,7 +191,15 @@ func Test_Stash_Cleanup(t *testing.T) {
 	valueInBytes, _ := json.Marshal(value)
 
 	s := Default()
-	s.store[key] = entry{data: valueInBytes, expiresAt: time.Now().Add(-time.Minute)}
+
+	// Add expired entry
+	e := &entry{
+		key:       key,
+		data:      valueInBytes,
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	element := s.order.PushFront(e)
+	s.store[key] = element
 	s.usedMemory += len(valueInBytes)
 
 	s.cleanup()
