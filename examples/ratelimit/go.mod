@@ -3,7 +3,7 @@ module github.com/charmingruby/examples/ratelimit
 go 1.24.3
 
 require (
-	github.com/charmingruby/stashem v0.0.0-20250815182145-f1f86f1d77df
+	github.com/charmingruby/stashem v0.1.1
 	github.com/gin-gonic/gin v1.10.1
 )
 
